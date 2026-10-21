@@ -1,4 +1,4 @@
-# Community Pharmacy Demo API (Persistent version)
+# Community Pharmacy Demo API
 
 This version uses PostgreSQL so inventory and order records survive service restarts and redeploys. It is designed for the TSG Labs / Chord assessment with fictional data only.
 

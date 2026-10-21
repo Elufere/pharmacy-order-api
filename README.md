@@ -1,72 +1,61 @@
-# Community Pharmacy Demo API
+# Pharmacy Order API
 
-This version uses PostgreSQL so inventory and order records survive service restarts and redeploys. It is designed for the TSG Labs / Chord assessment with fictional data only.
+Node.js/Express and PostgreSQL API for the Community Pharmacy Demo / Chord assessment. Includes inventory lookup, order intake, invoices, Paystack test checkout and verification, and protected pharmacy fulfilment endpoints.
 
-## Endpoints
-
-- `GET /health` — verifies the API and database connection.
-- `GET /inventory?query=paracetamol` — search product names or IDs; omit query to list all products.
-- `POST /orders` — creates a customer-confirmed order, transactionally validates and decrements stock, and persists order/items.
-- `GET /orders/:id` — retrieve an order by UUID or order reference.
-
-## Seed products
-
-| ID | Product | Unit | Price | Initial stock |
-|---|---|---|---:|---:|
-| `med-001` | Paracetamol 500 mg | pack | ₦1,500 | 20 |
-| `supp-001` | Vitamin C | bottle | ₦2,000 | 12 |
-
-Seed records are inserted only when missing. Restarts do not reset existing stock or overwrite prices.
-
-## Create order request
-
-```json
-{
-  "customerConfirmed": true,
-  "items": [
-    { "productId": "med-001", "quantity": 2 }
-  ]
-}
-```
-
-Optional request header: `Idempotency-Key: <unique-key>`. Reusing the same key returns the original successful response rather than creating another order.
+## Requirements
+- Node.js 20+
+- PostgreSQL
+- `DATABASE_URL`
+- `PAYSTACK_SECRET_KEY` (Paystack test secret key for payment testing)
+- `PHARMACY_API_KEY` (long random secret used only by pharmacy staff endpoints)
 
 ## Run locally
-
-Requires Node.js 20+ and PostgreSQL.
-
 ```bash
 npm install
-DATABASE_URL='postgresql://USER:PASSWORD@localhost:5432/pharmacy_orders' npm start
+DATABASE_URL="postgresql://..." PAYSTACK_SECRET_KEY="sk_test_..." PHARMACY_API_KEY="replace-with-a-long-random-secret" npm start
 ```
 
-For a local database without TLS, do not add `sslmode=require`. For Render's external database URL, use the supplied URL with `sslmode=require`. For a web service on Render, use the database's internal URL and deploy the database and service in the same region/account.
+Do not commit secrets or use live payment keys for this demo.
 
-## Deploy on Render
+## Endpoints
+- `GET /health`
+- `GET /inventory?query=paracetamol`
+- `POST /orders` — requires `customerConfirmed: true`; creates order, decrements stock transactionally, and creates an unpaid invoice.
+- `GET /orders/:id-or-orderRef`
+- `GET /orders/:id-or-orderRef/invoice`
+- `POST /orders/:id-or-orderRef/payment` — body: `{"email":"demo@example.com"}`; returns a Paystack hosted checkout URL.
+- `GET /payments/verify/:reference` — verifies status, reference, amount and NGN currency with Paystack before marking invoice paid.
+- `GET /pharmacy/orders?status=awaiting_pharmacy_confirmation` — requires `x-pharmacy-api-key`.
+- `PATCH /pharmacy/orders/:id-or-orderRef/status` — requires `x-pharmacy-api-key`; JSON body e.g. `{"status":"confirmed"}`, then `{"status":"ready_for_pickup"}` or `{"status":"rejected"}`.
 
-### Option A: Render Blueprint
-1. Push this folder to a GitHub repository.
-2. In Render, choose **New → Blueprint** and select the repository containing `render.yaml`.
-3. Review the plan and resources, then apply. The Blueprint defines the web service and PostgreSQL database and wires `DATABASE_URL`.
-4. Wait for both resources to become available.
-5. Open the web service URL with `/health` appended. Expected response: `{"status":"ok","database":"connected","service":"pharmacy-order-api"}`.
+## Order and payment lifecycle
+1. Customer explicitly confirms an itemized order.
+2. API creates the order and invoice (`unpaid`).
+3. Customer provides an email; API initializes Paystack test checkout using the server-side secret key.
+4. After checkout, call the verify endpoint using the returned payment reference.
+5. Invoice is marked paid only when Paystack's server response reports a successful transaction with the expected reference, amount in kobo, and `NGN` currency.
+6. Pharmacy staff use protected endpoints to confirm/reject orders and mark confirmed orders ready for pickup.
 
-### Option B: create resources manually
-1. Create a Render PostgreSQL database.
-2. Create a Render Web Service from this repository with build command `npm install` and start command `npm start`.
-3. Add environment variable `DATABASE_URL` with the database's **Internal Database URL** if the service is in the same Render region/account. Otherwise use the External Database URL with TLS required.
-4. Deploy and check `/health`.
+Payment state and pharmacy fulfilment state are separate. Payment does not automatically mark an order ready. A failed, abandoned, mismatched or unverifiable payment leaves the invoice unpaid.
 
-## Safeguards
+## Render deployment
+The `render.yaml` blueprint declares the web service, PostgreSQL database, and two secret environment variables. Existing Render services may already exist; avoid creating duplicate services/databases. Set `PAYSTACK_SECRET_KEY` and `PHARMACY_API_KEY` under the existing service's Environment settings. Render can redeploy after saving.
 
-- Rejects requests unless `customerConfirmed` is exactly `true`.
-- Validates all product IDs and positive integer quantities.
-- Locks product rows in a database transaction and checks current stock before creating an order.
-- Decrements stock and writes order/items in the same transaction, avoiding partial orders and overselling.
-- Supports a persistent idempotency key to reduce duplicate order creation.
-- Stores no customer name, phone number, payment details, or medical data.
-- Orders are `awaiting_pharmacy_confirmation`; this API does not claim payment or final pharmacy acceptance.
+Generate a staff key locally, for example:
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+Set the generated value in Render as `PHARMACY_API_KEY`. Never put it in a public Chord tool or source control. For this exercise, call the staff endpoints only from a controlled test client; do not expose staff credentials to customers.
 
-## Honest limitations
+## Database migration and existing data
+On startup, the service adds the invoice/payment tables, adds `customer_email` and `updated_at` columns if missing, updates the allowed order statuses, and creates unpaid invoice records for existing orders. It seeds demo inventory only when product IDs are missing and does not reset stock.
 
-This is an assessment/demo API, not production pharmacy software. It uses fictional products; there is no authentication or authorization on these endpoints, no payment, no prescription validation, no delivery workflow, and no pharmacy staff dashboard. Do not use it with real customer/patient data or expose it as a live pharmacy system. Before any real deployment, add authentication, rate limiting, audit/retention controls, staff authorization, monitoring, backups/recovery checks, and appropriate operational and regulatory review.
+## Important demo limitations
+- The invoice is a structured JSON record, not a downloadable PDF.
+- Paystack is configured for test mode only; use only fictional data.
+- This demo does not send email/SMS receipts or customer notifications.
+- Pharmacy staff endpoints use a shared API key, suitable only for a controlled demo; production needs stronger identity/access management, audit logs, and secret rotation.
+- Before real use, add automated tests for concurrent orders, duplicate payments/webhooks, payment timeouts, stock reconciliation, backups, monitoring, and pharmacy operational processes.
+
+## AI assistance
+AI tools were used to help draft and review the API implementation, documentation, and test plan. The deployed agent itself runs on Chord and calls this external API.

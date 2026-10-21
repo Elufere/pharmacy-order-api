@@ -11,6 +11,10 @@ services:
         fromDatabase:
           name: pharmacy-order-db
           property: connectionString
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PHARMACY_API_KEY
+        sync: false
 
 databases:
   - name: pharmacy-order-db

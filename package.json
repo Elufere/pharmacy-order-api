@@ -1,8 +1,8 @@
 {
   "name": "pharmacy-order-api",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Persistent demo inventory and order API for the Chord pharmacy assistant assessment",
+  "description": "Persistent pharmacy inventory, order, invoice, Paystack test payment, and fulfilment API for the Chord demo",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

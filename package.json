@@ -1,0 +1,18 @@
+{
+  "name": "pharmacy-order-api",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Persistent demo inventory and order API for the Chord pharmacy assistant assessment",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

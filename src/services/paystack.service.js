@@ -58,7 +58,7 @@ async function initializePayment(idOrRef, email) {
   }};
 }
 
-async function verifyPayment(reference) {
+async function verifyPayment(reference, { recordFailure = true } = {}) {
   if (!secretKey()) return { error: { status: 503, body: { error: "PAYMENTS_NOT_CONFIGURED", message: "Paystack test payments are not configured on this service." } } };
   const paymentResult = await pool.query(
     `SELECT p.id, p.invoice_id, p.reference, p.amount_kobo, p.status, i.order_id, i.amount_ngn, i.status AS invoice_status, o.status AS order_status
@@ -185,7 +185,9 @@ async function verifyPayment(reference) {
 
 
   const status = transaction.status === "abandoned" ? "abandoned" : "failed";
-  await pool.query("UPDATE payments SET status = $2, verified_at = NOW() WHERE id = $1 AND status <> 'success'", [payment.id, status]);
+  if (recordFailure) {
+    await pool.query("UPDATE payments SET status = $2, verified_at = NOW() WHERE id = $1 AND status <> 'success'", [payment.id, status]);
+  }
   return { error: { status: 409, body: {
     paymentStatus: status, invoiceStatus: "unpaid", reference,
     checks: { transactionStatus: transaction.status, amountMatches, currencyMatches, referenceMatches },

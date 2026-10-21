@@ -9,7 +9,12 @@ const paymentRoutes = require("./routes/payments");
 const pharmacyRoutes = require("./routes/pharmacy");
 
 const app = express();
-app.use(express.json({ limit: "32kb" }));
+app.use(express.json({
+  limit: "32kb",
+  verify(req, _res, buffer) {
+    if (req.originalUrl.split("?", 1)[0] === "/payments/webhook") req.rawBody = Buffer.from(buffer);
+  }
+}));
 
 app.get("/", (_req, res) => res.json({
   service: "Community Pharmacy Demo API",
@@ -22,6 +27,7 @@ app.get("/", (_req, res) => res.json({
     "GET /orders/:id/invoice",
     "POST /orders/:id/payment",
     "POST /payments/initialize",
+    "POST /payments/webhook",
     "GET /payments/verify/:reference",
     "GET /pharmacy/orders?status=all",
     "PATCH /pharmacy/orders/:id/status"

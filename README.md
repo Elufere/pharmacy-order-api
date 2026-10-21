@@ -37,6 +37,7 @@ Use your local PostgreSQL connection string and Paystack test credentials.
 - `GET /orders/:id-or-orderRef/invoice`: retrieve an order's invoice
 - `POST /orders/:id-or-orderRef/payment`: initialize Paystack checkout. JSON body: `{"email":"demo@example.com"}`. Only orders with `pending_payment` status can initialize checkout.
 - `POST /payments/initialize`: initialize Paystack checkout using JSON body `{"orderRef":"PH-...","email":"demo@example.com"}`. Returns the checkout URL after successful initialization; this does not confirm payment.
+- `POST /payments/webhook`: Paystack webhook endpoint. Validates `x-paystack-signature` against the raw request body, and independently verifies successful charge references with Paystack before updating payment state.
 - `GET /payments/verify/:reference`: verify a transaction with Paystack server-side. Checks transaction success, reference, amount in kobo, and NGN currency before marking the invoice paid and the order payment-confirmed.
 - `GET /pharmacy/orders?status=all`: retrieve orders in the pharmacist workflow. Requires the `x-pharmacy-api-key` header. Supported filters are `all`, `pending_payment`, `payment_confirmed`, and `ready_for_pickup`.
 - `PATCH /pharmacy/orders/:id-or-orderRef/status`: update an order's fulfilment status. Requires the `x-pharmacy-api-key` header. The only permitted transition is from `payment_confirmed` to `ready_for_pickup`, using the request body `{"status":"ready_for_pickup"}`. The backend also verifies that the associated invoice is paid.

@@ -5,12 +5,12 @@ const poolPath = require.resolve("../src/db/pool");
 const orderPath = require.resolve("../src/services/order.service");
 const invoicePath = require.resolve("../src/services/invoice.service");
 
-function setup({ failedUpdate } = {}) {
+function setup({ failedUpdate, paymentOverrides = {} } = {}) {
   const calls = [];
   const client = {
     async query(sql) {
       calls.push(sql.trim().split(/\s+/).slice(0, 3).join(" "));
-      if (sql.includes("FROM payments")) return { rowCount: 1, rows: [{ id: "payment-id", invoice_id: "invoice-id", reference: "expected-ref", amount_kobo: 125000, status: "pending", order_id: "order-id", amount_ngn: 1250, invoice_status: "unpaid", order_status: "pending_payment" }] };
+      if (sql.includes("FROM payments")) return { rowCount: 1, rows: [{ id: "payment-id", invoice_id: "invoice-id", reference: "expected-ref", amount_kobo: 125000, status: "pending", order_id: "order-id", amount_ngn: 1250, invoice_status: "unpaid", order_status: "pending_payment", ...paymentOverrides }] };
       if (sql.startsWith("UPDATE payments") && !sql.includes("RETURNING")) return { rowCount: 1, rows: [] };
       if (sql.includes("FROM orders") && sql.includes("FOR UPDATE")) return { rowCount: 1, rows: [{ id: "order-id", status: "pending_payment" }] };
       if (sql.includes("UPDATE payments")) return { rowCount: failedUpdate === "payment" ? 0 : 1, rows: [{ id: "payment-id" }] };
@@ -33,6 +33,29 @@ function setup({ failedUpdate } = {}) {
   process.env.PAYSTACK_SECRET_KEY = "test-only-placeholder";
   global.fetch = async () => ({ ok: true, json: async () => ({ status: true, data: { id: 42, reference: "expected-ref", amount: 125000, currency: "NGN", status: "success" } }) });
   return { service: require("../src/services/paystack.service"), calls };
+}
+
+test("duplicate successful verification is idempotent and performs no writes", async () => {
+  const { service, calls } = setup({ paymentOverrides: { status: "success", invoice_status: "paid", order_status: "ready_for_pickup" } });
+  let paystackCalls = 0;
+  global.fetch = async () => { paystackCalls++; throw new Error("duplicate must not need another provider request"); };
+  const result = await service.verifyPayment("expected-ref");
+  assert.equal(result.body.orderStatus, "ready_for_pickup");
+  assert.equal(paystackCalls, 0);
+  assert.deepEqual(calls, ["SELECT p.id, p.invoice_id,"]);
+});
+
+for (const [field, transaction] of [
+  ["amount", { amount: 1 }],
+  ["currency", { currency: "USD" }]
+]) {
+  test(`webhook verification ${field} mismatch does not update payment records`, async () => {
+    const { service, calls } = setup();
+    global.fetch = async () => ({ ok: true, json: async () => ({ status: true, data: { id: 42, reference: "expected-ref", amount: 125000, currency: "NGN", status: "success", ...transaction } }) });
+    const result = await service.verifyPayment("expected-ref", { recordFailure: false });
+    assert.equal(result.error.status, 409);
+    assert.ok(!calls.some(call => call.startsWith("UPDATE")));
+  });
 }
 
 test("successful Paystack verification atomically confirms payment, invoice, and order", async () => {

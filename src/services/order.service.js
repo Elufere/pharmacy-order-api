@@ -66,7 +66,7 @@ async function createOrder({ items, customerEmail, idempotencyKey }) {
     const orderRef = `PH-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
     const orderResult = await client.query(
       `INSERT INTO orders (id, order_ref, status, total_ngn, customer_email)
-       VALUES ($1, $2, 'awaiting_pharmacy_confirmation', $3, $4)
+       VALUES ($1, $2, 'pending_payment', $3, $4)
        RETURNING id, order_ref, status, total_ngn, customer_email, created_at, updated_at`,
       [orderId, orderRef, totalNgn, customerEmail || null]
     );
@@ -79,7 +79,8 @@ async function createOrder({ items, customerEmail, idempotencyKey }) {
       );
     }
     for (const [productId, quantity] of quantities) {
-      await client.query("UPDATE inventory SET stock = stock - $1, updated_at = NOW() WHERE id = $2", [quantity, productId]);
+      const deduction = await client.query("UPDATE inventory SET stock = stock - $1, updated_at = NOW() WHERE id = $2 AND stock >= $1 RETURNING id", [quantity, productId]);
+      if (deduction.rowCount !== 1) throw new Error(`Inventory deduction failed for ${productId}.`);
     }
 
     const itemResult = await client.query(
@@ -93,7 +94,10 @@ async function createOrder({ items, customerEmail, idempotencyKey }) {
       [invoiceId, invoiceRef, orderId, totalNgn]
     );
     const response = { ...orderDto(orderResult.rows[0], itemResult.rows), invoice: { invoiceRef, amountNgn: totalNgn, status: "unpaid" } };
-    if (idempotencyKey) await client.query("UPDATE idempotency_keys SET response_json = $2::jsonb WHERE key = $1", [idempotencyKey, JSON.stringify(response)]);
+    if (idempotencyKey) {
+      const saved = await client.query("UPDATE idempotency_keys SET response_json = $2::jsonb WHERE key = $1 RETURNING key", [idempotencyKey, JSON.stringify(response)]);
+      if (saved.rowCount !== 1) throw new Error("Idempotency response could not be saved.");
+    }
     await client.query("COMMIT"); transactionOpen = false;
     return { response, status: 201 };
   } catch (error) {

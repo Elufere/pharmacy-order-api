@@ -1,61 +1,96 @@
 # Pharmacy Order API
 
-Node.js/Express and PostgreSQL API for the Community Pharmacy Demo / Chord assessment. Includes inventory lookup, order intake, invoices, Paystack test checkout and verification, and protected pharmacy fulfilment endpoints.
+Modular Node.js/Express + PostgreSQL API for the Community Pharmacy Demo and Chord assessment. It supports inventory lookup, order intake, invoice records, Paystack test checkout and server-side payment verification, and protected pharmacy fulfilment endpoints.
 
-## Requirements
-- Node.js 20+
-- PostgreSQL
+## Structure
+
+- `src/server.js`: app setup and route mounting
+- `src/db/`: PostgreSQL connection pool and startup schema initialization
+- `src/routes/`: HTTP routes
+- `src/services/`: order, invoice, and Paystack business logic
+- `src/middleware/`: pharmacy staff API-key protection
+- `src/utils/`: order response DTO mapping
+
+## Environment
+
 - `DATABASE_URL`
-- `PAYSTACK_SECRET_KEY` (Paystack test secret key for payment testing)
-- `PHARMACY_API_KEY` (long random secret used only by pharmacy staff endpoints)
+- `PAYSTACK_SECRET_KEY`: use a Paystack **test secret key only**
+- `PHARMACY_API_KEY`: long, randomly generated secret for staff-only endpoints
+
+Never commit real keys or put the Paystack secret in Chord.
 
 ## Run locally
+
 ```bash
 npm install
 DATABASE_URL="postgresql://..." PAYSTACK_SECRET_KEY="sk_test_..." PHARMACY_API_KEY="replace-with-a-long-random-secret" npm start
 ```
 
-Do not commit secrets or use live payment keys for this demo.
+Use your local PostgreSQL connection string and Paystack test credentials.
 
 ## Endpoints
-- `GET /health`
-- `GET /inventory?query=paracetamol`
-- `POST /orders` — requires `customerConfirmed: true`; creates order, decrements stock transactionally, and creates an unpaid invoice.
-- `GET /orders/:id-or-orderRef`
-- `GET /orders/:id-or-orderRef/invoice`
-- `POST /orders/:id-or-orderRef/payment` — body: `{"email":"demo@example.com"}`; returns a Paystack hosted checkout URL.
-- `GET /payments/verify/:reference` — verifies status, reference, amount and NGN currency with Paystack before marking invoice paid.
-- `GET /pharmacy/orders?status=awaiting_pharmacy_confirmation` — requires `x-pharmacy-api-key`.
-- `PATCH /pharmacy/orders/:id-or-orderRef/status` — requires `x-pharmacy-api-key`; JSON body e.g. `{"status":"confirmed"}`, then `{"status":"ready_for_pickup"}` or `{"status":"rejected"}`.
+
+- `GET /health`: health check
+- `GET /inventory?query=paracetamol`: search inventory
+- `POST /orders`: create an order; requires `customerConfirmed: true`. Checks and decrements stock and creates an unpaid invoice within a database transaction.
+- `GET /orders/:id-or-orderRef`: retrieve an order
+- `GET /orders/:id-or-orderRef/invoice`: retrieve an order's invoice
+- `POST /orders/:id-or-orderRef/payment`: initialize Paystack checkout. JSON body: `{"email":"demo@example.com"}`. Only orders with `pending_payment` status can initialize checkout.
+- `POST /payments/initialize`: initialize Paystack checkout using JSON body `{"orderRef":"PH-...","email":"demo@example.com"}`. Returns the checkout URL after successful initialization; this does not confirm payment.
+- `GET /payments/verify/:reference`: verify a transaction with Paystack server-side. Checks transaction success, reference, amount in kobo, and NGN currency before marking the invoice paid and the order payment-confirmed.
+- `GET /pharmacy/orders?status=all`: retrieve orders in the pharmacist workflow. Requires the `x-pharmacy-api-key` header. Supported filters are `all`, `pending_payment`, `payment_confirmed`, and `ready_for_pickup`.
+- `PATCH /pharmacy/orders/:id-or-orderRef/status`: update an order's fulfilment status. Requires the `x-pharmacy-api-key` header. The only permitted transition is from `payment_confirmed` to `ready_for_pickup`, using the request body `{"status":"ready_for_pickup"}`. The backend also verifies that the associated invoice is paid.
 
 ## Order and payment lifecycle
-1. Customer explicitly confirms an itemized order.
-2. API creates the order and invoice (`unpaid`).
-3. Customer provides an email; API initializes Paystack test checkout using the server-side secret key.
-4. After checkout, call the verify endpoint using the returned payment reference.
-5. Invoice is marked paid only when Paystack's server response reports a successful transaction with the expected reference, amount in kobo, and `NGN` currency.
-6. Pharmacy staff use protected endpoints to confirm/reject orders and mark confirmed orders ready for pickup.
 
-Payment state and pharmacy fulfilment state are separate. Payment does not automatically mark an order ready. A failed, abandoned, mismatched or unverifiable payment leaves the invoice unpaid.
+1. The customer explicitly confirms the itemized order.
+2. The API creates the order with status `pending_payment`, creates an invoice with status `unpaid`, and deducts the requested inventory within a database transaction.
+3. The customer provides an email address, and the API initializes Paystack checkout using test credentials.
+4. The customer completes checkout. Initializing checkout alone does not confirm payment.
+5. The API verifies the transaction directly with Paystack. Only a verified successful transaction with the expected reference, amount, and currency can mark the invoice `paid` and move the order to `payment_confirmed`.
+6. The pharmacist dashboard can show `pending_payment`, `payment_confirmed`, and `ready_for_pickup` orders.
+7. The pharmacist can move an order from `payment_confirmed` to `ready_for_pickup` only when the invoice is paid.
+
+Failed, abandoned, mismatched, or unverifiable payments must not mark the invoice paid. Payment confirmation does not automatically mark an order ready for pickup.
 
 ## Render deployment
-The `render.yaml` blueprint declares the web service, PostgreSQL database, and two secret environment variables. Existing Render services may already exist; avoid creating duplicate services/databases. Set `PAYSTACK_SECRET_KEY` and `PHARMACY_API_KEY` under the existing service's Environment settings. Render can redeploy after saving.
 
-Generate a staff key locally, for example:
+The Blueprint declares a web service, PostgreSQL database, and secret environment variables. If resources already exist, update the existing service rather than creating duplicates.
+
+Set `DATABASE_URL`, `PAYSTACK_SECRET_KEY`, and `PHARMACY_API_KEY` in the Render service's environment settings as required by the deployment configuration. Use Paystack test credentials and fictional data for the demo.
+
+Generate a staff API key locally:
+
 ```bash
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
-Set the generated value in Render as `PHARMACY_API_KEY`. Never put it in a public Chord tool or source control. For this exercise, call the staff endpoints only from a controlled test client; do not expose staff credentials to customers.
 
-## Database migration and existing data
-On startup, the service adds the invoice/payment tables, adds `customer_email` and `updated_at` columns if missing, updates the allowed order statuses, and creates unpaid invoice records for existing orders. It seeds demo inventory only when product IDs are missing and does not reset stock.
+Do not commit or share the generated key. The shared-key approach is intended for a controlled demo only.
 
-## Important demo limitations
-- The invoice is a structured JSON record, not a downloadable PDF.
-- Paystack is configured for test mode only; use only fictional data.
-- This demo does not send email/SMS receipts or customer notifications.
-- Pharmacy staff endpoints use a shared API key, suitable only for a controlled demo; production needs stronger identity/access management, audit logs, and secret rotation.
-- Before real use, add automated tests for concurrent orders, duplicate payments/webhooks, payment timeouts, stock reconciliation, backups, monitoring, and pharmacy operational processes.
+## Existing data and migration
+
+At startup, schema initialization creates missing tables and columns, updates the order status constraint, migrates legacy order statuses, seeds missing demo inventory without resetting existing stock, and creates missing unpaid invoices for eligible `pending_payment` orders.
+
+Legacy orders with invoices are mapped according to invoice status: paid invoices result in `payment_confirmed`, while unpaid invoices result in `pending_payment`. Legacy orders without invoices are moved to `pending_payment` before missing invoices are created for eligible orders.
+
+Back up important data before deploying schema or migration changes. Review historical records before applying migrations to any production database.
+
+## Limitations
+
+- Invoices are JSON/API records, not downloadable PDF documents.
+- Use Paystack test credentials and fictional data only.
+- There is no automatic email/SMS receipt or payment webhook; verification is initiated through the API.
+- Pharmacist endpoints use a shared API key. Production use requires stronger access controls, audit logs, and key rotation.
+- Before real use, add automated tests for concurrency, payment retries and webhooks, timeout recovery, stock reconciliation, backups, monitoring, and cancellation/refund operations.
 
 ## AI assistance
-AI tools were used to help draft and review the API implementation, documentation, and test plan. The deployed agent itself runs on Chord and calls this external API.
+
+AI tools helped draft and refactor the API, documentation, and test plan. The deployed agent runs on Chord and calls this external API.
+
+## Simplified order statuses
+
+- `pending_payment`: the order was created, but payment has not been verified.
+- `payment_confirmed`: Paystack verification succeeded and the invoice is paid.
+- `ready_for_pickup`: the pharmacist marked the paid order as ready for collection.
+
+The backend restricts pharmacist fulfilment to `payment_confirmed` → `ready_for_pickup` and checks the invoice is paid before allowing that transition.

@@ -14,7 +14,7 @@ async function initializeDatabase() {
     CREATE TABLE IF NOT EXISTS orders (
       id UUID PRIMARY KEY,
       order_ref TEXT NOT NULL UNIQUE,
-      status TEXT NOT NULL DEFAULT 'awaiting_pharmacy_confirmation',
+      status TEXT NOT NULL DEFAULT 'pending_payment',
       total_ngn BIGINT NOT NULL CHECK (total_ngn >= 0),
       customer_email TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -23,21 +23,6 @@ async function initializeDatabase() {
 
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_email TEXT;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-
-    DO $$
-    DECLARE c RECORD;
-    BEGIN
-      FOR c IN
-        SELECT conname FROM pg_constraint
-        WHERE conrelid = 'orders'::regclass AND contype = 'c'
-          AND pg_get_constraintdef(oid) ILIKE '%status%'
-      LOOP
-        EXECUTE format('ALTER TABLE orders DROP CONSTRAINT %I', c.conname);
-      END LOOP;
-    END $$;
-
-    ALTER TABLE orders ADD CONSTRAINT orders_status_check
-      CHECK (status IN ('awaiting_pharmacy_confirmation', 'confirmed', 'rejected', 'ready_for_pickup'));
 
     CREATE TABLE IF NOT EXISTS order_items (
       id BIGSERIAL PRIMARY KEY,
@@ -66,6 +51,37 @@ async function initializeDatabase() {
       paid_at TIMESTAMPTZ
     );
 
+    -- Replace only the constraint owned by this initializer before changing
+    -- legacy values, so the old allowed-status check does not reject updates.
+    ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
+
+    -- Migrate legacy order statuses into the simplified payment workflow.
+    UPDATE orders o
+    SET status = CASE
+      WHEN i.status = 'paid' THEN 'payment_confirmed'
+      ELSE 'pending_payment'
+    END,
+    updated_at = NOW()
+    FROM invoices i
+    WHERE i.order_id = o.id
+      AND o.status IN ('awaiting_pharmacy_confirmation', 'confirmed');
+
+    -- Legacy orders without invoices must also leave the old workflow.
+    UPDATE orders
+    SET status = 'pending_payment',
+        updated_at = NOW()
+    WHERE status IN ('awaiting_pharmacy_confirmation', 'confirmed');
+
+    ALTER TABLE orders ADD CONSTRAINT orders_status_check
+      CHECK (status IN (
+        'pending_payment',
+        'payment_confirmed',
+        'ready_for_pickup',
+        'awaiting_pharmacy_confirmation',
+        'confirmed',
+        'rejected'
+      ));
+
     CREATE TABLE IF NOT EXISTS payments (
       id UUID PRIMARY KEY,
       invoice_id UUID NOT NULL REFERENCES invoices(id),
@@ -93,11 +109,15 @@ async function initializeDatabase() {
 
   await pool.query(`
     INSERT INTO invoices (id, invoice_ref, order_id, amount_ngn, status)
-    SELECT gen_random_uuid(), 'INV-' || upper(substr(md5(o.order_ref), 1, 10)),
-           o.id, o.total_ngn, 'unpaid'
+    SELECT gen_random_uuid(),
+          'INV-' || upper(substr(md5(o.order_ref), 1, 10)),
+          o.id,
+          o.total_ngn,
+          'unpaid'
     FROM orders o
     LEFT JOIN invoices i ON i.order_id = o.id
     WHERE i.id IS NULL
+      AND o.status = 'pending_payment'
     ON CONFLICT DO NOTHING
   `);
 }

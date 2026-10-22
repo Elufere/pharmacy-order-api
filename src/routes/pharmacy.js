@@ -4,7 +4,6 @@ const requirePharmacyKey = require("../middleware/requirePharmacyKey");
 const { getOrderWithItems } = require("../services/order.service");
 const { getInvoiceForOrder } = require("../services/invoice.service");
 const router = express.Router();
-const { sendReadyForPickupNotification } = require("../services/chord.service");
 
 router.use(requirePharmacyKey);
 
@@ -61,23 +60,11 @@ router.patch("/orders/:id/status", async (req, res, next) => {
       return res.status(409).json({ error: "INVALID_STATUS_TRANSITION", message: "The order status changed before the update could be applied." });
     }
     await client.query("COMMIT");
-    await client.query("COMMIT");
-
-    let notification;
-    try {
-      notification = await sendReadyForPickupNotification(
-        updated.rows[0].order_ref
-      );
-    } catch (error) {
-      console.error("Chord notification scheduling failed:", error.message);
-      notification = { sent: false, error: "NOTIFICATION_FAILED" };
-    }
 
     return res.json({
       orderRef: updated.rows[0].order_ref,
       status: updated.rows[0].status,
       updatedAt: updated.rows[0].updated_at,
-      notification,
     });
 
   } catch (error) {

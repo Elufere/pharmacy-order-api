@@ -3,6 +3,7 @@ const pool = require("../db/pool");
 const requirePharmacyKey = require("../middleware/requirePharmacyKey");
 const { getOrderWithItems } = require("../services/order.service");
 const { getInvoiceForOrder } = require("../services/invoice.service");
+const { sendNotification } = require("../services/chord.service");
 const router = express.Router();
 
 router.use(requirePharmacyKey);
@@ -60,6 +61,16 @@ router.patch("/orders/:id/status", async (req, res, next) => {
       return res.status(409).json({ error: "INVALID_STATUS_TRANSITION", message: "The order status changed before the update could be applied." });
     }
     await client.query("COMMIT");
+
+    try {
+      await sendNotification("ready_for_pickup", updated.rows[0].order_ref);
+    } catch (error) {
+      console.error("Chord pickup notification dispatch failed", {
+        eventType: "ready_for_pickup",
+        orderRef: updated.rows[0].order_ref,
+        error: error?.message || "Notification failed",
+      });
+    }
 
     return res.json({
       orderRef: updated.rows[0].order_ref,

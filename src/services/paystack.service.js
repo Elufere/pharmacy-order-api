@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const pool = require("../db/pool");
 const { getOrderWithItems } = require("./order.service");
 const { getInvoiceForOrder } = require("./invoice.service");
+const { sendNotification } = require("./chord.service");
 
 const secretKey = () => process.env.PAYSTACK_SECRET_KEY || "";
 
@@ -61,7 +62,7 @@ async function initializePayment(idOrRef, email) {
 async function verifyPayment(reference, { recordFailure = true } = {}) {
   if (!secretKey()) return { error: { status: 503, body: { error: "PAYMENTS_NOT_CONFIGURED", message: "Paystack test payments are not configured on this service." } } };
   const paymentResult = await pool.query(
-    `SELECT p.id, p.invoice_id, p.reference, p.amount_kobo, p.status, i.order_id, i.amount_ngn, i.status AS invoice_status, o.status AS order_status
+    `SELECT p.id, p.invoice_id, p.reference, p.amount_kobo, p.status, i.order_id, i.amount_ngn, i.status AS invoice_status, o.order_ref, o.status AS order_status
      FROM payments p JOIN invoices i ON i.id = p.invoice_id JOIN orders o ON o.id = i.order_id WHERE p.reference = $1`,
     [reference]
   );
@@ -160,6 +161,18 @@ async function verifyPayment(reference, { recordFailure = true } = {}) {
       if (orderUpdate.rowCount !== 1) throw new Error("Order was not updated during payment verification.");
 
       await client.query("COMMIT");
+
+      if (payment.status !== "success") {
+        try {
+          await sendNotification("payment_confirmed", payment.order_ref);
+        } catch (error) {
+          console.error("Chord payment notification dispatch failed", {
+            eventType: "payment_confirmed",
+            orderRef: payment.order_ref,
+            error: error?.message || "Notification failed",
+          });
+        }
+      }
 
       return {
         body: {

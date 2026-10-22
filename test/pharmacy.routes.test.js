@@ -1,13 +1,15 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-function loadRoutes({ rows = [], orderStatus = "payment_confirmed", invoiceStatus = "paid" } = {}) {
+function loadRoutes({ rows = [], orderStatus = "payment_confirmed", invoiceStatus = "paid", failNotification = false } = {}) {
   const poolPath = require.resolve("../src/db/pool");
   const orderPath = require.resolve("../src/services/order.service");
   const invoicePath = require.resolve("../src/services/invoice.service");
+  const chordPath = require.resolve("../src/services/chord.service");
   const routePath = require.resolve("../src/routes/pharmacy");
   const queries = [];
   const transaction = [];
+  const notifications = [];
   const client = {
     async query(sql) {
       transaction.push(sql.trim().split(/\s+/).slice(0, 3).join(" "));
@@ -25,11 +27,12 @@ function loadRoutes({ rows = [], orderStatus = "payment_confirmed", invoiceStatu
   require.cache[poolPath] = { id: poolPath, filename: poolPath, loaded: true, exports: pool };
   require.cache[orderPath] = { id: orderPath, filename: orderPath, loaded: true, exports: { getOrderWithItems: async (_db, ref) => ({ order: { orderRef: ref, status: "pending_payment", items: [] } }) } };
   require.cache[invoicePath] = { id: invoicePath, filename: invoicePath, loaded: true, exports: { getInvoiceForOrder: async () => ({ invoice_ref: "INV-1", amount_ngn: 200, status: "unpaid", paid_at: null }) } };
+  require.cache[chordPath] = { id: chordPath, filename: chordPath, loaded: true, exports: { sendNotification: async (...args) => { transaction.push("NOTIFY"); notifications.push(args); if (failNotification) throw new Error("Chord unavailable"); } } };
   delete require.cache[routePath];
   const router = require(routePath);
   const getHandler = router.stack.find(layer => layer.route?.path === "/orders" && layer.route.methods.get).route.stack[0].handle;
   const patchHandler = router.stack.find(layer => layer.route?.path === "/orders/:id/status" && layer.route.methods.patch).route.stack[0].handle;
-  return { getHandler, patchHandler, queries, transaction };
+  return { getHandler, patchHandler, queries, transaction, notifications };
 }
 
 function response() {
@@ -57,8 +60,19 @@ test("pharmacist listing rejects unsupported status filters", async () => {
   assert.equal(queries.length, 0);
 });
 
-test("paid payment_confirmed order can transition to ready_for_pickup", async () => {
-  const { patchHandler, transaction } = loadRoutes();
+test("paid payment_confirmed order can transition to ready_for_pickup and notify after commit", async () => {
+  const { patchHandler, transaction, notifications } = loadRoutes();
+  const res = response();
+  await patchHandler({ params: { id: "PH-1" }, body: { status: "ready_for_pickup" } }, res, error => { throw error; });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.status, "ready_for_pickup");
+  assert.ok(transaction.includes("COMMIT"));
+  assert.ok(transaction.indexOf("COMMIT") < transaction.indexOf("NOTIFY"));
+  assert.deepEqual(notifications, [["ready_for_pickup", "PH-1"]]);
+});
+
+test("pickup notification failure does not undo the committed status update", async () => {
+  const { patchHandler, transaction } = loadRoutes({ failNotification: true });
   const res = response();
   await patchHandler({ params: { id: "PH-1" }, body: { status: "ready_for_pickup" } }, res, error => { throw error; });
   assert.equal(res.statusCode, 200);

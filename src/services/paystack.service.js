@@ -23,40 +23,91 @@ async function initializePayment(idOrRef, email) {
       }
     };
   }
-  const invoice = await getInvoiceForOrder(orderResult.row.id);
+  let invoice = await getInvoiceForOrder(orderResult.row.id);
   if (!invoice) return { error: { status: 404, body: { error: "INVOICE_NOT_FOUND", message: "No invoice exists for this order." } } };
   if (invoice.status !== "unpaid") return { error: { status: 409, body: { error: invoice.status === "paid" ? "ALREADY_PAID" : "INVOICE_NOT_PAYABLE", message: "Only unpaid invoices can initialize checkout." } } };
 
-  const reference = `ph_${crypto.randomUUID().replace(/-/g, "")}`;
-  const amountKobo = Number(invoice.amount_ngn) * 100;
-  const response = await fetch("https://api.paystack.co/transaction/initialize", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${secretKey()}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ email, amount: String(amountKobo), currency: "NGN", reference, metadata: { orderRef: invoice.order_ref, invoiceRef: invoice.invoice_ref } }),
-    signal: AbortSignal.timeout(15000)
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok || !payload?.status || !payload?.data?.authorization_url || !payload?.data?.reference) {
-    console.error("Paystack initialization failed:", payload?.message || response.status);
-    return { error: { status: 502, body: { error: "PAYMENT_INITIALIZATION_FAILED", message: "Paystack could not initialize checkout. No payment has been confirmed; retry or contact the pharmacy." } } };
+  // Before returning an existing checkout URL, ask Paystack whether that attempt
+  // is still open. It may have completed while the browser was away.
+  const pendingResult = await pool.query(
+    `SELECT reference, authorization_url FROM payments
+     WHERE invoice_id = $1 AND status = 'pending'
+     ORDER BY created_at DESC LIMIT 1`,
+    [invoice.id]
+  );
+  if (pendingResult.rowCount) {
+    const existing = pendingResult.rows[0];
+    const verification = await verifyPayment(existing.reference);
+    if (verification.body?.paymentStatus === "success") {
+      return { error: { status: 409, body: { error: "ALREADY_PAID", message: "This order has already been paid." } } };
+    }
+    if (!verification.error || !["failed", "abandoned"].includes(verification.error.body?.paymentStatus)) {
+      if (verification.error && verification.error.body?.paymentStatus !== "pending") return verification;
+      return { status: 200, body: { orderRef: invoice.order_ref, invoiceRef: invoice.invoice_ref, paymentReference: existing.reference, amountNgn: Number(invoice.amount_ngn), currency: "NGN", paymentStatus: "pending", checkoutUrl: existing.authorization_url, message: "Continue the existing Paystack checkout." } };
+    }
   }
 
-  await pool.query(
-    `INSERT INTO payments (id, invoice_id, reference, amount_kobo, status, authorization_url)
-     VALUES ($1, $2, $3, $4, 'pending', $5)`,
-    [crypto.randomUUID(), invoice.id, payload.data.reference, amountKobo, payload.data.authorization_url]
-  );
-  await pool.query("UPDATE orders SET customer_email = COALESCE(customer_email, $2), updated_at = NOW() WHERE id = $1", [orderResult.row.id, email]);
-  return { status: 201, body: {
-    orderRef: invoice.order_ref,
-    invoiceRef: invoice.invoice_ref,
-    paymentReference: payload.data.reference,
-    amountNgn: Number(invoice.amount_ngn),
-    currency: "NGN",
-    paymentStatus: "pending",
-    checkoutUrl: payload.data.authorization_url,
-    message: "Open the checkout URL to complete the test payment. The order is not marked paid until verification succeeds."
-  }};
+  const reference = `ph_${crypto.randomUUID().replace(/-/g, "")}`;
+  const amountKobo = Number(invoice.amount_ngn) * 100;
+  const client = await pool.connect();
+  let transactionOpen = false;
+  try {
+    await client.query("BEGIN"); transactionOpen = true;
+    const lockedOrder = await client.query("SELECT id, status FROM orders WHERE id = $1 FOR UPDATE", [orderResult.row.id]);
+    if (!lockedOrder.rowCount || lockedOrder.rows[0].status !== "pending_payment") {
+      await client.query("ROLLBACK"); transactionOpen = false;
+      return { error: { status: 409, body: { error: "ORDER_NOT_PAYABLE", message: "Only orders awaiting payment can initialize checkout." } } };
+    }
+    const lockedInvoice = await client.query("SELECT id, invoice_ref, order_id, order_ref, amount_ngn, status FROM invoices WHERE id = $1 FOR UPDATE", [invoice.id]);
+    if (!lockedInvoice.rowCount || lockedInvoice.rows[0].status !== "unpaid") {
+      await client.query("ROLLBACK"); transactionOpen = false;
+      return { error: { status: 409, body: { error: "ALREADY_PAID", message: "This invoice is no longer payable." } } };
+    }
+    invoice = lockedInvoice.rows[0];
+    const activeAttempt = await client.query(
+      `SELECT reference, authorization_url FROM payments
+       WHERE invoice_id = $1 AND status = 'pending'
+       ORDER BY created_at DESC LIMIT 1`, [invoice.id]
+    );
+    if (activeAttempt.rowCount) {
+      await client.query("COMMIT"); transactionOpen = false;
+      return { status: 200, body: { orderRef: invoice.order_ref, invoiceRef: invoice.invoice_ref, paymentReference: activeAttempt.rows[0].reference, amountNgn: Number(invoice.amount_ngn), currency: "NGN", paymentStatus: "pending", checkoutUrl: activeAttempt.rows[0].authorization_url, message: "Continue the existing Paystack checkout." } };
+    }
+
+    const response = await fetch("https://api.paystack.co/transaction/initialize", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${secretKey()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, amount: String(amountKobo), currency: "NGN", reference, metadata: { orderRef: invoice.order_ref, invoiceRef: invoice.invoice_ref } }),
+      signal: AbortSignal.timeout(15000)
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.status || !payload?.data?.authorization_url || payload?.data?.reference !== reference) {
+      console.error("Paystack initialization failed", { httpStatus: response.status, responseReferenceMatched: payload?.data?.reference === reference });
+      await client.query("ROLLBACK"); transactionOpen = false;
+      return { error: { status: 502, body: { error: "PAYMENT_INITIALIZATION_FAILED", message: "Paystack could not initialize checkout. No payment has been confirmed; retry or contact the pharmacy." } } };
+    }
+
+    await client.query(
+      `INSERT INTO payments (id, invoice_id, reference, amount_kobo, status, authorization_url)
+       VALUES ($1, $2, $3, $4, 'pending', $5)`,
+      [crypto.randomUUID(), invoice.id, reference, amountKobo, payload.data.authorization_url]
+    );
+    await client.query("UPDATE orders SET customer_email = COALESCE(customer_email, $2), updated_at = NOW() WHERE id = $1", [orderResult.row.id, email]);
+    await client.query("COMMIT"); transactionOpen = false;
+    return { status: 201, body: {
+      orderRef: invoice.order_ref,
+      invoiceRef: invoice.invoice_ref,
+      paymentReference: reference,
+      amountNgn: Number(invoice.amount_ngn),
+      currency: "NGN",
+      paymentStatus: "pending",
+      checkoutUrl: payload.data.authorization_url,
+      message: "Open the checkout URL to complete the test payment. The order is not marked paid until verification succeeds."
+    }};
+  } catch (error) {
+    if (transactionOpen) { try { await client.query("ROLLBACK"); } catch (_) {} }
+    throw error;
+  } finally { client.release(); }
 }
 
 async function verifyPayment(reference, { recordFailure = true } = {}) {
@@ -245,7 +296,13 @@ async function verifyPayment(reference, { recordFailure = true } = {}) {
   }
 
 
-  const status = transaction.status === "abandoned" ? "abandoned" : "failed";
+  if (!["failed", "abandoned"].includes(transaction.status)) {
+    return { error: { status: 409, body: {
+      paymentStatus: "pending", invoiceStatus: payment.invoice_status, reference,
+      message: "This Paystack attempt has not reached a final status. Continue using its existing checkout link."
+    } } };
+  }
+  const status = transaction.status;
   if (recordFailure) {
     await pool.query("UPDATE payments SET status = $2, verified_at = NOW() WHERE id = $1 AND status <> 'success'", [payment.id, status]);
   }

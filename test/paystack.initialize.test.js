@@ -83,6 +83,7 @@ test("checkout initialization sends NGN amount in kobo and stores/returns the ex
   const saved = state.attempts[0];
   assert.equal(request.amount, "125000");
   assert.equal(request.currency, "NGN");
+  assert.match(request.reference, /^ph-[a-f0-9]{32}$/);
   assert.equal(request.reference, result.body.paymentReference);
   assert.equal(saved.reference, result.body.paymentReference);
   assert.equal(saved.url, result.body.checkoutUrl);

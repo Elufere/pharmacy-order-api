@@ -47,7 +47,7 @@ async function initializePayment(idOrRef, email) {
     }
   }
 
-  const reference = `ph_${crypto.randomUUID().replace(/-/g, "")}`;
+  const reference = `ph-${crypto.randomUUID().replace(/-/g, "")}`;
   const amountKobo = Number(invoice.amount_ngn) * 100;
   const client = await pool.connect();
   let transactionOpen = false;

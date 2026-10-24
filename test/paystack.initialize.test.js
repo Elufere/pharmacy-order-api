@@ -6,7 +6,7 @@ function setup({ verificationStatus = "pending", invoiceStatus = "unpaid" } = {}
   const orderPath = require.resolve("../src/services/order.service");
   const invoicePath = require.resolve("../src/services/invoice.service");
   const chordPath = require.resolve("../src/services/chord.service");
-  const state = { attempts: [], invoiceStatus, verificationStatus, lockTail: Promise.resolve(), initRequests: [] };
+  const state = { attempts: [], invoiceStatus, verificationStatus, lockTail: Promise.resolve(), initRequests: [], statements: [] };
   function activeAttempt(invoiceId) { return state.attempts.find(attempt => attempt.invoiceId === invoiceId && attempt.status === "pending"); }
   const pool = {
     async query(sql, params = []) {
@@ -30,6 +30,7 @@ function setup({ verificationStatus = "pending", invoiceStatus = "unpaid" } = {}
       let unlock;
       return {
         async query(sql, params = []) {
+          state.statements.push(sql);
           if (sql === "BEGIN") return { rowCount: null, rows: [] };
           if (sql.includes("FROM orders") && sql.includes("FOR UPDATE")) {
             const previous = state.lockTail;
@@ -37,7 +38,7 @@ function setup({ verificationStatus = "pending", invoiceStatus = "unpaid" } = {}
             await previous;
             return { rowCount: 1, rows: [{ id: "order-1", status: "pending_payment" }] };
           }
-          if (sql.includes("FROM invoices WHERE id = $1 FOR UPDATE")) return { rowCount: 1, rows: [{ id: "invoice-1", invoice_ref: "INV-1", order_id: "order-1", order_ref: "PH-1", amount_ngn: 1250, status: state.invoiceStatus }] };
+          if (sql.includes("FROM invoices i JOIN orders o") && sql.includes("FOR UPDATE OF i")) return { rowCount: 1, rows: [{ id: "invoice-1", invoice_ref: "INV-1", order_id: "order-1", order_ref: "PH-1", amount_ngn: 1250, status: state.invoiceStatus }] };
           if (sql.includes("FROM payments") && sql.includes("status = 'pending'")) {
             const attempt = activeAttempt(params[0]);
             return { rowCount: attempt ? 1 : 0, rows: attempt ? [{ reference: attempt.reference, authorization_url: attempt.url }] : [] };
@@ -86,6 +87,7 @@ test("checkout initialization sends NGN amount in kobo and stores/returns the ex
   assert.equal(saved.reference, result.body.paymentReference);
   assert.equal(saved.url, result.body.checkoutUrl);
   assert.equal(result.status, 201);
+  assert.match(state.statements.find(sql => sql.includes("FROM invoices i JOIN orders o")), /FOR UPDATE OF i/);
 });
 
 test("repeated initialization reuses the current still-open checkout instead of creating a conflicting transaction", async () => {

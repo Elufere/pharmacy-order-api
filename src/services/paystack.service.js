@@ -58,7 +58,12 @@ async function initializePayment(idOrRef, email) {
       await client.query("ROLLBACK"); transactionOpen = false;
       return { error: { status: 409, body: { error: "ORDER_NOT_PAYABLE", message: "Only orders awaiting payment can initialize checkout." } } };
     }
-    const lockedInvoice = await client.query("SELECT id, invoice_ref, order_id, order_ref, amount_ngn, status FROM invoices WHERE id = $1 FOR UPDATE", [invoice.id]);
+    const lockedInvoice = await client.query(
+      `SELECT i.id, i.invoice_ref, i.order_id, o.order_ref, i.amount_ngn, i.status
+       FROM invoices i JOIN orders o ON o.id = i.order_id
+       WHERE i.id = $1 FOR UPDATE OF i`,
+      [invoice.id]
+    );
     if (!lockedInvoice.rowCount || lockedInvoice.rows[0].status !== "unpaid") {
       await client.query("ROLLBACK"); transactionOpen = false;
       return { error: { status: 409, body: { error: "ALREADY_PAID", message: "This invoice is no longer payable." } } };

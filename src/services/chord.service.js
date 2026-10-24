@@ -1,5 +1,4 @@
 const DEFAULT_BASE_URL = "https://api.chordhq.xyz";
-const CONVERSATION_ID = "6ad9bfd74c772d0e6f520272";
 
 function redactSecrets(value, apiKey = "") {
   if (Array.isArray(value)) return value.map(entry => redactSecrets(entry, apiKey));
@@ -11,15 +10,17 @@ function redactSecrets(value, apiKey = "") {
   }));
 }
 
-async function sendNotification(eventType, orderRef) {
+async function sendNotification(eventType, orderRef, details = {}) {
   const baseUrl = (process.env.CHORD_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
   const apiKey = process.env.CHORD_API_KEY;
   const workspaceId = process.env.CHORD_WORKSPACE_ID;
   const teammateId = process.env.CHORD_TEAMMATE_ID;
+  const conversationId = process.env.CHORD_CONVERSATION_ID;
   const missing = [
     ["CHORD_API_KEY", apiKey],
     ["CHORD_WORKSPACE_ID", workspaceId],
     ["CHORD_TEAMMATE_ID", teammateId],
+    ["CHORD_CONVERSATION_ID", conversationId],
   ].filter(([, value]) => !value).map(([name]) => name);
 
   if (missing.length) {
@@ -36,8 +37,10 @@ async function sendNotification(eventType, orderRef) {
     teammate_id: teammateId,
     payload: {
       platform: "DIRECT_LINE",
-      conversation_id: CONVERSATION_ID,
-      body: eventType === "payment_confirmed"
+      conversation_id: conversationId,
+      body: eventType === "low_inventory"
+        ? `Low inventory alert: ${details.name || orderRef} has ${details.stock} available; threshold is ${details.threshold}.`
+        : eventType === "payment_confirmed"
         ? `Payment confirmed for pharmacy order ${orderRef}.`
         : `Your pharmacy order ${orderRef} is ready for pickup.`,
     },

@@ -22,6 +22,8 @@ app.get("/", (_req, res) => res.json({
   endpoints: [
     "GET /health",
     "GET /inventory?query=paracetamol",
+    "POST /inventory",
+    "POST /inventory/:id/top-up",
     "POST /orders",
     "GET /orders/:id",
     "GET /orders/:id/invoice",

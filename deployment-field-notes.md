@@ -1,93 +1,44 @@
-# Deployment Field Notes
-## Community Pharmacy Order & Stock Agent
+# Deployment field notes — Pharmacy Assistant
 
-**Project:** Pharmacy Assistant  
-**Platform:** Chord  
-**Backend:** Node.js and Express  
-**Database:** PostgreSQL  
-**Hosting:** Render  
-**Integration channel:** Chord test conversation and WhatsApp-style simulator
+**Preferred role:** Forward-Deployed Engineering
+**System:** Chord teammate (configuration is held in Chord, not this repository) → Node.js/Express API → PostgreSQL; Paystack is used for checkout and payment verification. The API's Chord notification sender creates scheduled tasks.
 
-### 1. Deployment Summary
+These notes distinguish source/commit evidence and mocked tests from external observations. The project history supplied for this audit reports that payment and pickup tasks/messages appeared in Chord, but no provider logs or screenshots are present in this repository. Delivery in `chat.tsglabs.dev` remains unverified. No live Paystack transaction was verified as part of this audit.
 
-I built and deployed an AI pharmacy assistant that checks product inventory and prices, prepares order summaries, and submits orders after explicit customer confirmation.
+## 1. Payment confirmation must be based on Paystack verification
 
-The backend is hosted on Render and connected to PostgreSQL. Two custom API tools were configured in Chord:
+**Observed behavior / error evidence:** A checkout initialization response only gives a pending payment and checkout URL. The code does not treat that response as payment. No real Paystack error response or transaction log is retained here.
 
-- **Search Pharmacy Inventory:** Retrieves product names, prices, units, and current stock.
-- **Create Pharmacy Order:** Creates an order and returns an order reference, total, and fulfilment status.
+**Diagnosis and evidence:** `src/services/paystack.service.js` calls Paystack's server-side transaction verification endpoint, then checks provider status, exact kobo amount, currency, and reference. The payment row, invoice, and order are updated in a database transaction; it locks the order and rolls back if an expected update affects no row. `test/paystack.service.test.js` covers amount/currency/reference/status mismatches, transaction rollback, duplicate verification, and notification failure. These are mocked tests, not proof of a real charge.
 
-The deployment was verified through the health endpoint, direct API tests, and an end-to-end conversation with Pharmacy Assistant.
+**Root cause / fix:** Treating a browser return or checkout initialization as proof would allow an unpaid order to be marked paid. The implemented fix is server-side verification plus transactional state changes. The webhook additionally checks the raw-body HMAC signature and calls the same verification path for `charge.success`.
 
-### 2. Issues Encountered and Resolutions
+**Remaining risk:** Provider timeouts and database errors do not mark the invoice paid, but staff need an operational process to retry verification. There is no automated reconciliation job. Notification delivery is attempted after commit and has no persistent retry.
 
-#### Issue 1: Git push rejected because the remote contained existing history
+**Action for Chord:** Document how a Chord flow should hand a payment reference to the backend and wait for a verified backend result, including retry-safe behavior and what the customer should see while verification is unavailable. Do not encourage an agent to infer success from a checkout redirect.
 
-**Observed error:** Git rejected the initial push to `main` because the remote repository contained commits not present in the local repository. After pulling with `--allow-unrelated-histories`, Git reported a conflict in `README.md`.
+## 2. Chord notification regression and order reference
 
-**Root cause:** The local project and the existing GitHub repository had separate histories, and both contained a README file.
+**Observed behavior / exact error:** The commit history shows the notification service and pickup call site were removed in commit `af12c3f` (message: “fix: deliver pharmacy order notifications through Chord”), after they had been introduced in `50ae448`. No runtime error text from the regression is preserved, so none is asserted here. The prior payment verification query also did not select `o.order_ref` even though its notification call needed that value.
 
-**Resolution:** I resolved the README conflict, staged the file, committed the merge, and pushed the branch. Render subsequently deployed the repository's `main` branch.
+**Diagnosis and evidence:** `git show af12c3f` shows `src/services/chord.service.js` deleted and the pharmacist route's notification import/call removed. `git show c37b302` shows the service and pickup call restored, payment notification added, and `o.order_ref` added to the payment query. This is direct commit-diff evidence for the code-level regression and correction. It does not establish why the removal was made or prove a particular production error occurred.
 
-**Lesson:** Check the remote repository before the first push. When merging unrelated histories, inspect both versions of conflicting files rather than automatically overwriting one. Verify the final commit contains the intended application code before deploying.
+**Root cause / fix:** Notification code and call sites were not retained across a change; in the restored payment call path, the selected record needed to include `order_ref`. The current query selects it and both post-commit call sites pass it to the shared Chord sender. Focused tests assert the order reference is in the task message, that payment notification follows commit, and that notification failure does not undo committed state. Chord service tests check a mocked task response and secret redaction.
 
-#### Issue 2: The initial simulator did not clearly identify the intended teammate
+**Regression prevention and limitation:** Keep tests around both notification call sites and verify the queried data includes the message's order reference. Repeated payment verification returns early after success; repeating the pickup transition is rejected before the notification call. A failure is logged but is not retried or alerted automatically.
 
-**Observed behaviour:** The WhatsApp Simulator initially displayed “Chord Assistant,” while the intended agent was “Pharmacy Assistant.” The Pharmacy Assistant settings also showed that no messaging channel was bound to the teammate.
+**Action for Chord:** Provide a typed SDK/schema or validation error when a scheduled-task payload references unsupported fields or destinations, and document the required task response fields and delivery lifecycle. That would make integration regressions easier to diagnose than relying on a successful task-creation response alone.
 
-**Root cause:** The initial simulator link and the intended teammate's test conversation were separate testing contexts.
+## 3. Scheduled task observed, customer simulator delivery unresolved
 
-**Resolution:** I opened Pharmacy Assistant's dedicated test conversation and tested the inventory and order flows there. The teammate successfully invoked the custom inventory tool and created an order after explicit confirmation.
+**Observed behavior:** The supplied project history reports scheduled tasks and both payment-confirmation and pickup messages in Chord. It also reports that the messages did not appear in `https://chat.tsglabs.dev/`. No screenshot, task export, delivery receipt, or simulator trace is included here. There is no recorded HTTP error message for this delivery gap; do not infer one.
 
-**Lesson:** Test the intended teammate directly before assuming a shared simulator link is exercising the correct agent. Before go-live, verify the production channel is bound to the intended teammate.
+**Diagnosis:** The current API request uses `task_type: MESSAGE`, a `DIRECT_LINE` payload, and a configured `conversation_id`. The original code hardcoded one conversation ID; this audit removed that literal and made the destination an explicit `CHORD_CONVERSATION_ID` deployment setting. That removes a code-embedded destination but does not implement customer-specific routing. The backend stores an email but no customer-to-Chord-conversation mapping. The Chord API contract for delivering to a simulator/customer conversation and the authorization required to do so were not available in the repository; the simulator site was inaccessible through the available browser tool during the audit.
 
-#### Issue 3: Inventory changed during testing
+**Root cause / fix or workaround:** The confirmed facts establish task/message visibility in Chord and missing simulator appearance, not the underlying delivery cause. The safe workaround is to treat the Chord dashboard as the only observed destination, configure only a conversation authorized for that environment, and tell staff that customer receipt is unconfirmed. Do not claim customer delivery or use this for real customers.
 
-**Observed behaviour:** Paracetamol stock decreased from 20 packs to 19, then 18, and subsequently 16 as test orders were created.
+**Action for Chord:** Publish the supported outbound messaging contract, including how to address an existing customer conversation, how identity mapping and consent work, which channel bindings are required, what response/status means “delivered,” and how to inspect a failed or undelivered task. Provide a test fixture or delivery receipt visible in the simulator.
 
-**Root cause:** The test requests created real records in the demo PostgreSQL database and decremented inventory as designed.
+## Verification boundary
 
-**Resolution:** I checked the returned inventory values and confirmed they reflected the submitted test orders.
-
-**Lesson:** API tests that mutate state should use a dedicated test database or a documented reset procedure. Repeated test runs should not be assumed to be read-only. Before a demonstration, seed known inventory values and verify the starting state.
-
-### 3. Verification Results
-
-The following checks passed:
-
-- The `/health` endpoint returned `status: ok` and `database: connected`.
-- The inventory endpoint returned the expected seeded products and current stock.
-- The inventory API tool returned live data to Pharmacy Assistant.
-- The order API created orders and returned unique order references.
-- The assistant calculated the total correctly for two packs of Paracetamol at ₦1,500 per pack.
-- The assistant requested explicit confirmation before submitting the order.
-- After confirmation, the assistant returned the order reference and `awaiting_pharmacy_confirmation` status.
-- A declined, unconfirmed Vitamin C order was not submitted, and no order-creation tool call appeared in the conversation's visible tool activity.
-
-### 4. Remaining Risks and Limitations
-
-This is a functional demonstration, not a production-ready pharmacy system.
-
-- **Order cancellation:** The assistant cannot directly cancel or modify submitted orders. A real deployment needs a defined cancellation and escalation workflow.
-- **Pharmacy fulfilment:** Orders remain pending pharmacy confirmation. No fulfilment or delivery integration has been implemented.
-- **Authentication and abuse prevention:** The public API needs appropriate authentication, rate limiting, and access controls before being exposed to real customers.
-- **Concurrency and reliability:** Stock updates must remain correct under simultaneous orders, retries, and service interruptions. These cases require additional automated tests.
-- **Customer data:** Only fictional demonstration data should be used until privacy and data-retention controls are established.
-- **Free hosting:** Render's free web service may spin down after inactivity, causing slower initial responses. This can affect the customer experience.
-- **Medical safety:** The assistant must not diagnose conditions or independently recommend medication. Medical questions should be referred to a qualified pharmacist.
-
-### 5. Recommendations Before Go-Live
-
-1. Add automated tests for insufficient stock, invalid quantities, duplicate requests, database failures, and concurrent orders.
-2. Add authenticated API access and rate limiting.
-3. Implement a pharmacy review workflow for accepting, rejecting, or cancelling orders.
-4. Establish monitoring, structured logs, alerts, backups, and a recovery procedure.
-5. Test the actual customer messaging channel with the intended teammate.
-6. Review privacy, consent, retention, and operational requirements before using real customer information.
-7. Run a controlled pilot with a pharmacist supervising all orders before wider release.
-
-### 6. Overall Assessment
-
-The demonstration successfully connects a Chord AI teammate to a deployed backend and persistent database. It verifies the core inventory-to-order workflow, including explicit customer confirmation and clear communication that an order is pending pharmacy review.
-
-The next stage is reliability and operational hardening, not adding more conversational features. The priority is ensuring that inventory remains accurate, order creation is safe under failure conditions, and pharmacy staff retain control over fulfilment.
+The repository suite currently uses mocks for PostgreSQL, Paystack, and Chord. It verifies code paths and expected request construction; it does not verify an external Paystack payment, Chord task processing, or customer-facing simulator delivery. For those claims, attach redacted service/dashboard evidence and a simulator trace from an authorized environment.

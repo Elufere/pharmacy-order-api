@@ -40,7 +40,7 @@ async function createOrder({ items, customerEmail, idempotencyKey }) {
     for (const item of items) quantities.set(item.productId.trim(), (quantities.get(item.productId.trim()) || 0) + item.quantity);
     const productIds = [...quantities.keys()].sort();
     const selected = await client.query(
-      `SELECT id, name, unit, price_ngn, stock FROM inventory WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,
+      `SELECT id, name, unit, price_ngn, stock, low_stock_threshold, low_stock_alerted FROM inventory WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,
       [productIds]
     );
     const productMap = new Map(selected.rows.map(row => [row.id, row]));
@@ -78,11 +78,6 @@ async function createOrder({ items, customerEmail, idempotencyKey }) {
         [orderId, line.product.id, line.product.name, line.product.unit, line.quantity, line.unitPriceNgn, line.lineTotalNgn]
       );
     }
-    for (const [productId, quantity] of quantities) {
-      const deduction = await client.query("UPDATE inventory SET stock = stock - $1, updated_at = NOW() WHERE id = $2 AND stock >= $1 RETURNING id", [quantity, productId]);
-      if (deduction.rowCount !== 1) throw new Error(`Inventory deduction failed for ${productId}.`);
-    }
-
     const itemResult = await client.query(
       `SELECT product_id, product_name, unit, quantity, unit_price_ngn, line_total_ngn FROM order_items WHERE order_id = $1 ORDER BY id`,
       [orderId]

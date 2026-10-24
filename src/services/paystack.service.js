@@ -140,6 +140,45 @@ async function verifyPayment(reference, { recordFailure = true } = {}) {
       );
       if (payment.status !== "success" && paymentUpdate.rowCount !== 1) throw new Error("Payment record was not updated during verification.");
 
+      const orderLines = await client.query(
+        `SELECT product_id, SUM(quantity)::INTEGER AS quantity
+         FROM order_items WHERE order_id = $1 GROUP BY product_id ORDER BY product_id`,
+        [payment.order_id]
+      );
+      const productIds = orderLines.rows.map(row => row.product_id);
+      const lockedInventory = await client.query(
+        `SELECT id, name, stock, low_stock_threshold, low_stock_alerted
+         FROM inventory WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,
+        [productIds]
+      );
+      const inventoryById = new Map(lockedInventory.rows.map(row => [row.id, row]));
+      for (const line of orderLines.rows) {
+        const medicine = inventoryById.get(line.product_id);
+        if (!medicine || Number(line.quantity) > Number(medicine.stock)) {
+          await client.query("ROLLBACK");
+          return { error: { status: 409, body: {
+            error: "INSUFFICIENT_STOCK_AFTER_PAYMENT",
+            productId: line.product_id,
+            requested: Number(line.quantity),
+            available: Number(medicine?.stock || 0),
+            message: "Paystack reports successful payment, but available stock changed before it could be committed. Contact the pharmacy for resolution."
+          } } };
+        }
+      }
+
+      const lowStockAlerts = [];
+      if (order.status === "pending_payment") {
+        for (const line of orderLines.rows) {
+          const medicine = inventoryById.get(line.product_id);
+          const deduction = await client.query(`UPDATE inventory SET stock = stock - $1, updated_at = NOW(),
+            low_stock_alerted = CASE WHEN stock - $1 < low_stock_threshold THEN TRUE ELSE FALSE END
+            WHERE id = $2 AND stock >= $1 RETURNING id, name, stock, low_stock_threshold`, [Number(line.quantity), line.product_id]);
+          if (deduction.rowCount !== 1) throw new Error(`Inventory deduction failed for ${line.product_id}.`);
+          const updated = deduction.rows[0];
+          if (Number(updated.stock) < Number(updated.low_stock_threshold) && !medicine.low_stock_alerted) lowStockAlerts.push(updated);
+        }
+      }
+
       const invoiceUpdate = await client.query(
         `UPDATE invoices
          SET status = 'paid',
@@ -171,6 +210,15 @@ async function verifyPayment(reference, { recordFailure = true } = {}) {
             orderRef: payment.order_ref,
             error: error?.message || "Notification failed",
           });
+        }
+      }
+
+      for (const item of lowStockAlerts) {
+        try { await sendNotification("low_inventory", item.id, { name: item.name, stock: Number(item.stock), threshold: Number(item.low_stock_threshold) }); }
+        catch (error) {
+          console.error("Chord low inventory notification dispatch failed", { medicineId: item.id, error: error?.message || "Notification failed" });
+          try { await pool.query("UPDATE inventory SET low_stock_alerted = FALSE WHERE id = $1 AND stock < low_stock_threshold", [item.id]); }
+          catch (resetError) { console.error("Low inventory alert state reset failed", { medicineId: item.id, error: resetError?.message || "Reset failed" }); }
         }
       }
 

@@ -10,12 +10,13 @@ function loadRoutes({ rows = [], orderStatus = "payment_confirmed", invoiceStatu
   const queries = [];
   const transaction = [];
   const notifications = [];
+  let currentOrderStatus = orderStatus;
   const client = {
     async query(sql) {
       transaction.push(sql.trim().split(/\s+/).slice(0, 3).join(" "));
-      if (sql.includes("FROM orders") && sql.includes("FOR UPDATE")) return { rowCount: 1, rows: [{ id: "order-id", order_ref: "PH-1", status: orderStatus }] };
+      if (sql.includes("FROM orders") && sql.includes("FOR UPDATE")) return { rowCount: 1, rows: [{ id: "order-id", order_ref: "PH-1", status: currentOrderStatus }] };
       if (sql.includes("FROM invoices") && sql.includes("FOR UPDATE")) return invoiceStatus ? { rowCount: 1, rows: [{ status: invoiceStatus }] } : { rowCount: 0, rows: [] };
-      if (sql.startsWith("UPDATE orders")) return { rowCount: 1, rows: [{ order_ref: "PH-1", status: "ready_for_pickup", updated_at: new Date(0) }] };
+      if (sql.startsWith("UPDATE orders")) { currentOrderStatus = "ready_for_pickup"; return { rowCount: 1, rows: [{ order_ref: "PH-1", status: currentOrderStatus, updated_at: new Date(0) }] }; }
       return { rowCount: 1, rows: [] };
     },
     release() { transaction.push("RELEASE"); }
@@ -78,6 +79,19 @@ test("pickup notification failure does not undo the committed status update", as
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.status, "ready_for_pickup");
   assert.ok(transaction.includes("COMMIT"));
+});
+
+test("repeating a ready_for_pickup transition does not dispatch a duplicate notification", async () => {
+  const { patchHandler, notifications } = loadRoutes();
+  const req = { params: { id: "PH-1" }, body: { status: "ready_for_pickup" } };
+  const first = response();
+  await patchHandler(req, first, error => { throw error; });
+  const second = response();
+  await patchHandler(req, second, error => { throw error; });
+
+  assert.equal(first.statusCode, 200);
+  assert.equal(second.statusCode, 409);
+  assert.equal(notifications.length, 1);
 });
 
 test("unpaid invoice cannot transition an otherwise payment_confirmed order", async () => {

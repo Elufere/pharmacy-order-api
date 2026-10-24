@@ -8,8 +8,13 @@ async function initializeDatabase() {
       unit TEXT NOT NULL,
       price_ngn INTEGER NOT NULL CHECK (price_ngn >= 0),
       stock INTEGER NOT NULL CHECK (stock >= 0),
+      low_stock_threshold INTEGER NOT NULL DEFAULT 5 CHECK (low_stock_threshold >= 0),
+      low_stock_alerted BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE inventory ADD COLUMN IF NOT EXISTS low_stock_threshold INTEGER NOT NULL DEFAULT 5 CHECK (low_stock_threshold >= 0);
+    ALTER TABLE inventory ADD COLUMN IF NOT EXISTS low_stock_alerted BOOLEAN NOT NULL DEFAULT FALSE;
 
     CREATE TABLE IF NOT EXISTS orders (
       id UUID PRIMARY KEY,

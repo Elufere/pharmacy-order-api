@@ -1,97 +1,80 @@
-# Pharmacy Order API
+# Pharmacy Assistant — Chord assessment
 
-Modular Node.js/Express + PostgreSQL API for the Community Pharmacy Demo and Chord assessment. It supports inventory lookup, order intake, invoice records, Paystack test checkout and server-side payment verification, and protected pharmacy fulfilment endpoints.
+**Preferred role: Forward-Deployed Engineering**
 
-## Structure
+The business is a community pharmacy that needs to answer stock and price questions and capture customer orders consistently. The assistant uses live inventory and order tools so staff spend less time checking stock manually and customers receive a clear order reference and payment state. A pharmacy could pay for this workflow because missed enquiries, incorrect stock promises, and untracked orders cost staff time and sales. This demo deliberately excludes diagnosis and prescribing, delivery, cancellation/refund handling, production customer messaging, and production payment credentials.
 
-- `src/server.js`: app setup and route mounting
-- `src/db/`: PostgreSQL connection pool and startup schema initialization
-- `src/routes/`: HTTP routes
-- `src/services/`: order, invoice, and Paystack business logic
-- `src/middleware/`: pharmacy staff API-key protection
-- `src/utils/`: order response DTO mapping
+## Project and architecture
 
-## Environment
+This repository contains the Node.js/Express backend, PostgreSQL schema initialization, tests, deployment configuration, and submission notes. It does **not** contain the Chord teammate's prompt, tool definitions, skills, or an export of its configuration. The known project setup has a Chord teammate calling this API, but reviewers need an invitation or other authorized access to the Chord workspace and the Pharmacy Assistant teammate to inspect or interact with that agent. No reviewer access or live account was verifiable during this repository audit.
 
-- `DATABASE_URL`
-- `PAYSTACK_SECRET_KEY`: use a Paystack **test secret key only**
-- `PHARMACY_API_KEY`: long, randomly generated secret for staff-only endpoints
+- `src/server.js`: Express application, JSON parsing, routes, and database startup.
+- `src/routes/`: inventory, order, payment, and staff fulfilment endpoints.
+- `src/services/`: order/invoice logic, Paystack checkout and verification, and Chord scheduled-task requests.
+- `src/db/init.js`: idempotent schema initialization, legacy status migration, and demo inventory seed.
+- `test/`: Node's built-in test suite. External services and database behavior are mocked; these tests are not live integration proof.
+- `render.yaml`: Render Blueprint for the web service and PostgreSQL database.
 
-Never commit real keys or put the Paystack secret in Chord.
+## Local setup
 
-## Run locally
+Requirements: Node.js 20 or newer and a PostgreSQL database. Copy `.env.example` to `.env`, replace placeholders locally, and do not commit `.env` or share its secrets.
 
-```bash
+```sh
 npm install
-DATABASE_URL="postgresql://..." PAYSTACK_SECRET_KEY="sk_test_..." PHARMACY_API_KEY="replace-with-a-long-random-secret" npm start
+npm start
 ```
 
-Use your local PostgreSQL connection string and Paystack test credentials.
+For development, use `npm run dev`. The service listens on port 3000 by default, or `PORT` when provided. It initializes the schema before listening. Use a disposable database: order creation changes stock and the startup initializer seeds only missing inventory; it does not reset existing values.
 
-## Endpoints
+### Environment variables
 
-- `GET /health`: health check
-- `GET /inventory?query=paracetamol`: search inventory
-- `POST /orders`: create an order; requires `customerConfirmed: true`. Checks and decrements stock and creates an unpaid invoice within a database transaction.
-- `GET /orders/:id-or-orderRef`: retrieve an order
-- `GET /orders/:id-or-orderRef/invoice`: retrieve an order's invoice
-- `POST /orders/:id-or-orderRef/payment`: initialize Paystack checkout. JSON body: `{"email":"demo@example.com"}`. Only orders with `pending_payment` status can initialize checkout.
-- `POST /payments/initialize`: initialize Paystack checkout using JSON body `{"orderRef":"PH-...","email":"demo@example.com"}`. Returns the checkout URL after successful initialization; this does not confirm payment.
-- `POST /payments/webhook`: Paystack webhook endpoint. Validates `x-paystack-signature` against the raw request body, and independently verifies successful charge references with Paystack before updating payment state.
-- `GET /payments/verify/:reference`: verify a transaction with Paystack server-side. Checks transaction success, reference, amount in kobo, and NGN currency before marking the invoice paid and the order payment-confirmed.
-- `GET /pharmacy/orders?status=all`: retrieve orders in the pharmacist workflow. Requires the `x-pharmacy-api-key` header. Supported filters are `all`, `pending_payment`, `payment_confirmed`, and `ready_for_pickup`.
-- `PATCH /pharmacy/orders/:id-or-orderRef/status`: update an order's fulfilment status. Requires the `x-pharmacy-api-key` header. The only permitted transition is from `payment_confirmed` to `ready_for_pickup`, using the request body `{"status":"ready_for_pickup"}`. The backend also verifies that the associated invoice is paid.
+| Variable | Required | Purpose |
+|---|---|---|
+| `DATABASE_URL` | Yes | PostgreSQL connection string. |
+| `PAYSTACK_SECRET_KEY` | For payments | Paystack secret. Use a test key for this demo; never put it in Chord. |
+| `PHARMACY_API_KEY` | For staff routes | Shared key sent as `x-pharmacy-api-key`. |
+| `CHORD_API_KEY` | For notifications | Chord API bearer key. |
+| `CHORD_WORKSPACE_ID` | For notifications | Chord workspace used to create scheduled tasks. |
+| `CHORD_TEAMMATE_ID` | For notifications | Chord teammate used to create scheduled tasks. |
+| `CHORD_CONVERSATION_ID` | For notifications | Explicitly configured Direct Line conversation destination. The code does not look up a customer conversation. |
+| `CHORD_BASE_URL` | No | Chord API base URL; defaults to `https://api.chordhq.xyz`. Set only for an authorized environment. |
+| `PORT` | No | HTTP port; defaults to `3000`. |
 
-## Order and payment lifecycle
+## Run and test
 
-1. The customer explicitly confirms the itemized order.
-2. The API creates the order with status `pending_payment`, creates an invoice with status `unpaid`, and deducts the requested inventory within a database transaction.
-3. The customer provides an email address, and the API initializes Paystack checkout using test credentials.
-4. The customer completes checkout. Initializing checkout alone does not confirm payment.
-5. The API verifies the transaction directly with Paystack. Only a verified successful transaction with the expected reference, amount, and currency can mark the invoice `paid` and move the order to `payment_confirmed`.
-6. The pharmacist dashboard can show `pending_payment`, `payment_confirmed`, and `ready_for_pickup` orders.
-7. The pharmacist can move an order from `payment_confirmed` to `ready_for_pickup` only when the invoice is paid.
-
-Failed, abandoned, mismatched, or unverifiable payments must not mark the invoice paid. Payment confirmation does not automatically mark an order ready for pickup.
-
-## Render deployment
-
-The Blueprint declares a web service, PostgreSQL database, and secret environment variables. If resources already exist, update the existing service rather than creating duplicates.
-
-Set `DATABASE_URL`, `PAYSTACK_SECRET_KEY`, and `PHARMACY_API_KEY` in the Render service's environment settings as required by the deployment configuration. Use Paystack test credentials and fictional data for the demo.
-
-Generate a staff API key locally:
-
-```bash
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```sh
+npm test
+git diff --check
 ```
 
-Do not commit or share the generated key. The shared-key approach is intended for a controlled demo only.
+Tests use stubs/mocks for PostgreSQL, Paystack, and Chord. A passing suite verifies local behavior under those test doubles, not the live provider, Chord dashboard, or customer-facing simulator.
 
-## Existing data and migration
+## API and workflow
 
-At startup, schema initialization creates missing tables and columns, updates the order status constraint, migrates legacy order statuses, seeds missing demo inventory without resetting existing stock, and creates missing unpaid invoices for eligible `pending_payment` orders.
+- `GET /health` reports service and database status.
+- `GET /inventory?query=paracetamol` searches stock.
+- `POST /inventory` registers a medicine and requires `x-pharmacy-api-key`. Send `id` (unique SKU/identifier), `name`, `unit`, non-negative integer `priceNgn`, non-negative integer `stock`, and non-negative integer `lowStockThreshold`. Example: `curl -X POST http://localhost:3000/inventory -H 'Content-Type: application/json' -H 'x-pharmacy-api-key: YOUR_KEY' -d '{"id":"med-003","name":"Ibuprofen 200 mg","unit":"pack","priceNgn":1800,"stock":12,"lowStockThreshold":4}'`.
+- `POST /inventory/:id/top-up` requires `x-pharmacy-api-key` and a positive integer `quantity`; it adds that amount atomically. Example: `curl -X POST http://localhost:3000/inventory/med-003/top-up -H 'Content-Type: application/json' -H 'x-pharmacy-api-key: YOUR_KEY' -d '{"quantity":10}'`.
+- `POST /orders` creates an order only when `customerConfirmed: true`; it validates current availability and writes the order, items, invoice, and optional idempotency response together. It does not deduct stock while the order is unpaid.
+- `POST /payments/initialize` or `POST /orders/:id/payment` creates a Paystack checkout and records a pending attempt. Checkout initialization is not payment confirmation.
+- `GET /payments/verify/:reference` verifies with Paystack from the server. `POST /payments/webhook` checks Paystack's HMAC signature and independently verifies successful charge references.
+- Payment confirmation requires provider status `success`, the expected reference, exact amount in kobo, and `NGN`. The verified payment, invoice, order, and stock deduction are committed in one database transaction. Inventory rows are locked and rechecked during verification to prevent concurrent successful orders from overselling stock. If stock has changed since order creation, verification returns `INSUFFICIENT_STOCK_AFTER_PAYMENT` for staff resolution; Paystack has already reported success, and this API does not automatically refund that charge.
+- `GET /pharmacy/orders` and `PATCH /pharmacy/orders/:id/status` require the staff key. The only fulfilment transition is a paid `payment_confirmed` order to `ready_for_pickup`.
 
-Legacy orders with invoices are mapped according to invoice status: paid invoices result in `payment_confirmed`, while unpaid invoices result in `pending_payment`. Legacy orders without invoices are moved to `pending_payment` before missing invoices are created for eligible orders.
+After a successful commit, the backend asks Chord to create a scheduled `MESSAGE` task using `/v1/scheduled-tasks`. The request uses a one-minute scheduled time, `DIRECT_LINE`, and the configured conversation ID. The project history reports that tasks and both message types were observed in Chord. Delivery in `https://chat.tsglabs.dev/` has **not** been verified. The supported outbound delivery contract, customer identity mapping, and required authorization for customer-specific delivery remain unresolved. Do not treat a scheduled task or its API response as proof that a customer received a message.
 
-Back up important data before deploying schema or migration changes. Review historical records before applying migrations to any production database.
+Low inventory alerts use the same configured Chord scheduled-task mechanism and notify the configured pharmacy conversation when stock falls strictly below its threshold. A per-medicine database flag prevents repeat alerts until stock is restored to the threshold or higher. A failed dispatch is logged and its flag is cleared for a later retry. Task creation is not proof of message delivery.
 
-## Limitations
+If a Chord request fails, the backend logs the failure and leaves the committed payment/order state intact. There is no persistent outbox, automatic retry, dead-letter queue, or staff alert. Staff must check the Chord task/dashboard and order state and contact the customer through an independently confirmed channel. Duplicate successful payment verification returns early; a repeated pickup transition is rejected by the status guard, so the notification call is not repeated by that request path.
 
-- Invoices are JSON/API records, not downloadable PDF documents.
-- Use Paystack test credentials and fictional data only.
-- There is no automatic email/SMS receipt or payment webhook; verification is initiated through the API.
-- Pharmacist endpoints use a shared API key. Production use requires stronger access controls, audit logs, and key rotation.
-- Before real use, add automated tests for concurrency, payment retries and webhooks, timeout recovery, stock reconciliation, backups, monitoring, and cancellation/refund operations.
+## Deployment and limitations
 
-## AI assistance
+The Render Blueprint declares the API, PostgreSQL, and required secret environment entries. Configure the values in the service environment; `sync: false` entries are not supplied automatically. Keep Paystack test credentials and fictional customer data in the demo. Use authorized Chord credentials and an explicitly confirmed destination. Back up data before schema changes; `src/db/init.js` applies DDL and legacy status migration at startup. The shared staff key is demo-only.
 
-AI tools helped draft and refactor the API, documentation, and test plan. The deployed agent runs on Chord and calls this external API.
+This is not production-ready. It has no customer-specific conversation mapping, confirmed simulator delivery, notification retry/alerting, production access control, audit trail, rate limiting, cancellation/refund workflow, or operational recovery process. Before real use, a pharmacy and Chord must validate channel binding, consent/privacy and retention, payment credentials, monitoring and alert ownership, database backup/recovery, and supervised order handling. The assistant must refer medical advice to a pharmacist and must not diagnose or prescribe.
 
-## Simplified order statuses
+## Submission evidence
 
-- `pending_payment`: the order was created, but payment has not been verified.
-- `payment_confirmed`: Paystack verification succeeded and the invoice is paid.
-- `ready_for_pickup`: the pharmacist marked the paid order as ready for collection.
-
-The backend restricts pharmacist fulfilment to `payment_confirmed` → `ready_for_pickup` and checks the invoice is paid before allowing that transition.
+- [Deployment field notes](deployment-field-notes.md) distinguish repository/commit evidence from unresolved external behavior.
+- [Go-live note](go-live-note.md) summarizes owner-facing limitations and launch checks.
+- [Recording plan](recording-plan.md) is a timed script only. No screen recording is included in this repository.

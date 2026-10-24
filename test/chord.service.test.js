@@ -19,6 +19,7 @@ test("Chord notification uses the established scheduled-task route and logs task
   process.env.CHORD_API_KEY = "test-key-never-log";
   process.env.CHORD_WORKSPACE_ID = "test-workspace";
   process.env.CHORD_TEAMMATE_ID = "test-teammate";
+  process.env.CHORD_CONVERSATION_ID = "configured-test-conversation";
   let request;
   global.fetch = async (url, options) => {
     request = { url, options };
@@ -34,7 +35,7 @@ test("Chord notification uses the established scheduled-task route and logs task
   assert.equal(body.task_type, "MESSAGE");
   assert.equal(body.workspace_id, "test-workspace");
   assert.equal(body.teammate_id, "test-teammate");
-  assert.equal(body.payload.conversation_id, "6ad9bfd74c772d0e6f520272");
+  assert.equal(body.payload.conversation_id, "configured-test-conversation");
   assert.match(body.payload.body, /PH-1/);
   assert.deepEqual(result, { sent: true, taskId: "task-123", status: "scheduled" });
   assert.ok(logs.some(([, detail]) => detail?.eventType === "payment_confirmed"));
@@ -42,7 +43,21 @@ test("Chord notification uses the established scheduled-task route and logs task
   assert.ok(!JSON.stringify(logs).includes("test-key-never-log"));
 });
 
+test("Chord notification refuses to send without an explicitly configured destination", async () => {
+  process.env.CHORD_API_KEY = "test-key";
+  process.env.CHORD_WORKSPACE_ID = "test-workspace";
+  process.env.CHORD_TEAMMATE_ID = "test-teammate";
+  delete process.env.CHORD_CONVERSATION_ID;
+  let called = false;
+  global.fetch = async () => { called = true; };
+  delete require.cache[servicePath];
+
+  await assert.rejects(require(servicePath).sendNotification("payment_confirmed", "PH-3"), /configuration is incomplete/);
+  assert.equal(called, false);
+});
+
 test("Chord API error logs sanitized response body and rejects dispatch", async () => {
+  process.env.CHORD_CONVERSATION_ID = "configured-test-conversation";
   global.fetch = async () => ({ ok: false, status: 403, json: async () => ({ error: "forbidden", api_key: "must-not-log" }) });
   delete require.cache[servicePath];
   const { logs } = await captureLogs(() => assert.rejects(

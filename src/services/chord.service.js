@@ -1,3 +1,5 @@
+const DEFAULT_BASE_URL = "https://api.chordhq.xyz";
+
 function redactSecrets(value, apiKey = "") {
   if (Array.isArray(value)) return value.map(entry => redactSecrets(entry, apiKey));
   if (typeof value === "string") return apiKey ? value.split(apiKey).join("[REDACTED]") : value;
@@ -9,7 +11,7 @@ function redactSecrets(value, apiKey = "") {
 }
 
 async function sendNotification(eventType, orderRef, details = {}) {
-  const baseUrl = (process.env.CHORD_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = (process.env.CHORD_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
   const apiKey = process.env.CHORD_API_KEY;
   const workspaceId = process.env.CHORD_WORKSPACE_ID;
   const teammateId = process.env.CHORD_TEAMMATE_ID;

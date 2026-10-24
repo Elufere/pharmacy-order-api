@@ -45,7 +45,7 @@ function setup({ failedUpdate, paymentOverrides = {}, failNotification = false, 
 }
 
 test("duplicate successful verification is idempotent and performs no writes", async () => {
-  const { service, calls, state } = setup({ stock: 3, paymentOverrides: { status: "success", invoice_status: "paid", order_status: "ready_for_pickup" } });
+  const { service, calls, state, notifications } = setup({ stock: 3, paymentOverrides: { status: "success", invoice_status: "paid", order_status: "ready_for_pickup" } });
   let paystackCalls = 0;
   global.fetch = async () => { paystackCalls++; throw new Error("duplicate must not need another provider request"); };
   const result = await service.verifyPayment("expected-ref");
@@ -53,6 +53,7 @@ test("duplicate successful verification is idempotent and performs no writes", a
   assert.equal(paystackCalls, 0);
   assert.equal(state.stock, 3);
   assert.deepEqual(calls, ["SELECT p.id, p.invoice_id,"]);
+  assert.deepEqual(notifications, []);
 });
 
 for (const [field, transaction] of [
